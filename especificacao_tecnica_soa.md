@@ -1,6 +1,6 @@
 # Especificação Técnica: Ajustes na Integração SOA (Telefonia Solo e PayTV + Telefonia A La Carte)
 
-Esta especificação descreve as alterações técnicas necessárias na camada de integração SOA para suportar dois fluxos principais de provisionamento de Telefonia: **Telefonia Solo** e **PayTV + Telefonia A La Carte**, incluindo os ajustes nos componentes de barramento para geração de Ordens de Serviço (OS), atualização de pedidos, processamento de retornos e integração com TOA e SURF.
+Esta especificação descreve as alterações técnicas necessárias na camada de integração SOA para suportar dois fluxos principais de provisionamento de Telefonia: **Telefonia Solo** e **PayTV + Telefonia A La Carte**, incluindo os ajustes nos componentes de barramento para geração de Ordens de Serviço (OS), atualização de pedidos.
 
 ---
 
