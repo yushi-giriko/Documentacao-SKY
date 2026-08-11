@@ -112,7 +112,6 @@ sequenceDiagram
   - **Cenário Atual**: O fluxo do `ProcessSoftwareFulfillmentOrder` **não gera OS em nenhum cenário**.
   - **Alteração**: Ajustar o fluxo para passar a gerar OS (chamando o `CommunicationsWorkOrderEBSPS`) **apenas** nos cenários de:
     * Pedido de inclusão de Salesforce de Telefonia Solo (após receber o callback de ativação da API `serviceOrder` do Hub).
-    * Habilitação do a la carte de telefonia paytv do Salesforce.
 
 #### B. Componente `CommunicationsWorkOrderEBSPS`
 * **Ajuste no mapeamento da operação `createWorkOrder`**:
