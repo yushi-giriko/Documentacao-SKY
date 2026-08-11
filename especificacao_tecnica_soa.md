@@ -149,7 +149,7 @@ sequenceDiagram
 
 | Componente | Operação / Tipo | Resumo da Alteração | Fluxo Relacionado |
 | :--- | :--- | :--- | :--- |
-| `ProcessSoftwareFulfillmentOrder` | BPEL / Oracle SOA | Criar regra de decisão (Condition) para disparar a criação de OS apenas para os fluxos de "Telefonia Solo" (após callback) e "A La Carte Telefonia PayTV". | Telefonia Solo |
+| `ProcessSoftwareFulfillmentOrder` | BPEL / Oracle SOA | Criar regra de decisão (Condition) para disparar a criação de OS apenas para os fluxos de "Telefonia Solo" (após callback). | Telefonia Solo |
 | `CommunicationsWorkOrderEBSPS` | Mediator / BPEL | Ajustar mapeamento da operação `createWorkOrder` para enviar o `iccid` e remover os blocos de equipamento. Remover fluxo de resposta/callback destinado ao Salesforce *(Pendente de Validação)*. | Telefonia Solo |
 | `UpdateFulfillmentOrderOSBPEL` | BPEL | Ajustar a atribuição (XPath/Assign) do número da OS para apontar especificamente ao item do pedido de Telefonia. | Telefonia Solo |
 | `ProcessOSEReturnFulfillmentOrderEBFMIP` | BPEL | Adicionar suporte à subcategoria `"Telefonia_Plano"` nas validações e desviar (não executar) o serviço de inventário para esses itens. | PayTV + Telefonia A La Carte |
