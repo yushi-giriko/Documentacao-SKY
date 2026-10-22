@@ -5,24 +5,33 @@
 | **Projeto** | `26.0019.MK` - Sky Móvel - Venda e-SIM |
 | **Componentes Impactados** | BPELCORE (`ProcessCoreSalesEBF`), Maestro (`ProcessHardwareFulfillmentOrder`, `ProcessSoftwareFulfillmentOrder`) |
 | **Tecnologia** | Oracle SOA Suite (BPEL 11g/12c, Mediator, WSDL/XSD, JMS) |
-| **Versão** | 1.0 |
-| **Status** | Pronto para Desenvolvimento |
-| **Data** | 21/10/2026 |
+| **Versão** | 1.1 |
+| **Status** | Pronto para Desenvolvimento (Regra de e-SIM Atualizada) |
+| **Data** | 22/10/2026 |
 
 ---
 
-## 1. Visão Geral e Contexto de Negócio
+## 1. Visão Geral e Novas Regras de Negócio
 
-### 1.1. Objetivo e Premissas Arquiteturais
-Atender à comercialização da nova modalidade **Sky Móvel com tecnologia e-SIM**, abrangendo tanto os cenários em que há estoque de e-SIM no momento da venda (via Salesforce Web / PDVs) quanto os cenários em que não há estoque imediato.
+### 1.1. Regra Atualizada de Geração de Ordem de Serviço (OS) para e-SIM
+1. **Cenário Telefonia Solo (Avulsa / Standalone)**:
+   - **NÃO GERA ORDEM DE SERVIÇO (OS)**.
+   - Nenhuma OS é enviada ao MOS/TOA, independentemente do canal/PDV.
+   - O fluxo segue diretamente para o provisionamento via API `createOrder` (Mobile Services) executado pelo `ProcessSoftwareFulfillmentOrder`.
+2. **Cenário Venda Conjunta (PayTV + Telefonia e-SIM)**:
+   - A Ordem de Serviço (OS) no MOS/TOA é gerada **EXCLUSIVAMENTE para os equipamentos/itens de PayTV**.
+   - **NÃO criar item de OS para o e-SIM**: Tanto o BPELCORE quanto o `ProcessHardwareFulfillmentOrder` devem filtrar e suprimir a criação de itens de linha de telefonia móvel e-SIM na OS.
+   - **Observação na OS do PayTV**: Incluir no campo de observação/instrução da OS a mensagem informando que se trata de uma venda com habilitação de e-SIM (não cobrar/baixar chip físico).
 
-#### Premissas Arquiteturais do Ambiente SOA Suite:
-1. **Criação de Ordem de Serviço (OS) no MOS / TOA por PDV**:
-   - A criação da OS no TOA pode ser realizada tanto pelo **BPELCORE** quanto pelo **ProcessHardwareFulfillmentOrder**, dependendo da origem/regra do PDV (Canal de Venda).
-   - Em ambos os fluxos, a OS deve receber `lineActivationType`, `lineIccid` (se preenchido) e a marcação de venda conjunta PayTV + e-SIM.
-2. **Criação da Ordem no Mobile Services em Vendas Conjuntas**:
-   - Em vendas de PayTV + Sky Móvel (Telefonia), quem cria a ordem no Mobile Services é o **MOS / TOA após a criação da OS**.
-   - Em vendas solo de Telefonia, quem cria a ordem no Mobile Services é o **ProcessSoftwareFulfillmentOrder** (Maestro).
+### 1.2. Regra Atualizada de Integração com Mobile Services (`createOrder`)
+- A responsabilidade de integração com a API `createOrder` do Mobile Services é do componente **`ProcessSoftwareFulfillmentOrder` (Maestro)** (disparado assincronamente pela esteira de tramitação de pedidos):
+  - **Quando TIVER estoque de e-SIM** (`lineIccid` preenchido):
+    - Realiza a **ativação normal**, enviando o número real do ICCID no `createOrder`.
+    - Prossegue para liberação imediata no Parque.
+  - **Quando NÃO tiver estoque de e-SIM** (`lineIccid` nulo ou vazio):
+    - Informa no campo de ICCID o valor literal: `"ESIM sem estoque"`.
+    - A ordem é criada no Mobile Services com status: `"awaitingEsim"`.
+    - O Maestro entra em espera assíncrona (`<pick>`) aguardando a notificação do WebHook do Mobile Services após futura reserva do e-SIM (via iCare Clientes ou rotina de esteira).
 
 ---
 
@@ -53,53 +62,44 @@ sequenceDiagram
 
     PDV->>BPEL: Submete Proposta (lineActivationType, lineIccid?)
     BPEL->>CRM: Cria Cliente e Conta
-    BPEL->>CRM: Persiste Keyword LINE_ACTIVATION_TYPE = "ESIM"
+    BPEL->>CRM: Persiste Keyword SKY_MOBILE_ACTIVATION_TYPE = "ESIM"
 
     opt lineActivationType == "ESIM" E lineIccid == null
         BPEL->>ICARE: Cria Registro de Contato Completo (Razão 404321)
     end
 
-    opt Abertura de OS no BPELCORE (Conforme regra do PDV)
-        BPEL->>MOS: Cria OS com lineActivationType="ESIM", ICCID (se houver) e marcação PayTV+e-SIM
+    alt Cenário PayTV + Telefonia e-SIM
+        opt Abertura de OS via BPELCORE (Conforme regra do PDV)
+            BPEL->>MOS: Cria OS SOMENTE para PayTV (com Obs: Habilitação de e-SIM)<br/>[Sem item de OS para e-SIM]
+        end
+    else Cenário Telefonia Solo
+        Note over BPEL,MOS: NÃO gera OS no MOS/TOA para Telefonia Solo
     end
 
     BPEL->>ORD: Submete Pedido para a Tramitação Assíncrona (JMS)
     Note over BPEL,ORD: BPELCORE não chama o ProcessHardware diretamente
 
-    par Tramitação Assíncrona: Hardware Fulfillment
+    par Tramitação Assíncrona: Hardware Fulfillment (Se houver PayTV)
         ORD--)M_HW: Disparo assíncrono de ProcessHardware
         opt Abertura de OS via Hardware (Conforme regra do PDV)
-            M_HW->>MOS: Cria OS com lineActivationType="ESIM", ICCID (se houver) e marcação PayTV+e-SIM
+            M_HW->>MOS: Cria OS SOMENTE para PayTV (com Obs: Habilitação de e-SIM)<br/>[Sem item de OS para e-SIM]
         end
-        Note over M_HW: Se e-SIM: Não despacha chip físico nem baixa estoque
+        Note over M_HW: e-SIM não gera despacho físico nem baixa de chip
 
-    and Tramitação Assíncrona: Software Fulfillment
+    and Tramitação Assíncrona: Software Fulfillment (Linha Móvel)
         ORD--)M_SW: Disparo assíncrono de ProcessSoftware
-        alt Cenário PayTV + Telefonia e-SIM
-            Note over MOS,MS_API: Em PayTV + Telefonia, quem cria a ordem no Mobile Services é o MOS/TOA pós-criação da OS
-            alt e-SIM sem estoque
-                MOS->>MS_API: Invocação da API createOrder(ICCID="ESIM sem estoque")
-                MS_API-->>MOS: Retorno: Pedido criado com status "awaitingSIM"
-            else Com ICCID preenchido
-                MOS->>MS_API: Invocação da API createOrder(ICCID real)
-                MS_API-->>MOS: Retorno: Pedido criado com sucesso
-            end
-            M_SW->>M_SW: Correlaciona ordem e entra em Pick / Wait (aguarda ativação)
-
-        else Cenário Telefonia Avulsa (Standalone)
-            alt e-SIM sem estoque
-                M_SW->>MS_API: Invocação da API createOrder(ICCID="ESIM sem estoque")
-                MS_API-->>M_SW: Retorno: Pedido criado com status "awaitingSIM"
-                M_SW->>M_SW: Entra em Pick / Wait (Correlation na Ordem)
-            else Com ICCID preenchido
-                M_SW->>MS_API: Invocação da API createOrder(ICCID real)
-                MS_API-->>M_SW: Retorno: Sucesso / Pedido ativado
-                M_SW->>M_SW: Libera produto no Parque
-            end
+        alt Com Estoque de e-SIM (lineIccid preenchido)
+            M_SW->>MS_API: Invocação da API createOrder(ICCID real)
+            MS_API-->>M_SW: Retorno: Pedido criado e ativado com sucesso
+            M_SW->>M_SW: Libera produto no Parque
+        else Sem Estoque de e-SIM (lineIccid nulo/vazio)
+            M_SW->>MS_API: Invocação da API createOrder(ICCID="ESIM sem estoque")
+            MS_API-->>M_SW: Retorno: Pedido criado com status "awaitingEsim"
+            M_SW->>M_SW: Entra em Pick / Wait (Correlation na Ordem)
         end
     end
 
-    opt Quando a ordem estiver em status "awaitingSIM" (sem estoque de e-SIM)
+    opt Quando a ordem estiver em status "awaitingEsim"
         Note over M_SW,MS_WH: Reserva de e-SIM realizada posteriormente (via iCare ou rotina)
         MS_WH->>M_SW: Callback WebHook com ICCID alocado
         M_SW->>CRM: Grava ICCID na Keyword correspondente
@@ -124,6 +124,7 @@ No Enterprise Business Message (EBM) de entrada de vendas (`ProcessCoreSalesEBF_
         </xsd:documentation>
     </xsd:annotation>
 </xsd:element>
+
 ```
 
 ---
@@ -132,7 +133,7 @@ No Enterprise Business Message (EBM) de entrada de vendas (`ProcessCoreSalesEBF_
 - **Ação**: Durante a criação/atualização da Conta do Cliente no Billing/CRM (ex: BSCS, Kenan ou Siebel via EBS de Customer Management).
 - **Condição**: Sempre que o campo `lineActivationType` for informado.
 - **Mapeamento de Keyword**:
-  - `Keyword_Name`: `LINE_ACTIVATION_TYPE`
+  - `Keyword_Name`: `SKY_MOBILE_ACTIVATION_TYPE`
   - `Keyword_Value`: Valor recebido em `lineActivationType` (Ex.: `"ESIM"`).
 
 ---
@@ -165,93 +166,92 @@ No Enterprise Business Message (EBM) de entrada de vendas (`ProcessCoreSalesEBF_
 
 ### 3.4. Regra 3: Ajuste no Fluxo de Criação de OS pelo BPELCORE (Conforme PDV)
 - **Contexto Arquitetural**: A criação da Ordem de Serviço (OS) no MOS/TOA pode ser disparada **pelo BPELCORE ou pelo `ProcessHardwareFulfillmentOrder`**, dependendo da parametrização do canal de venda / PDV de origem.
-- **Regras quando a OS for criada pelo BPELCORE**:
-  1. **Flag de Ativação**: Mapear `lineActivationType` para o campo correspondente no TOA/MOS (ex: `lineActivationType = "ESIM"`).
-  2. **Envio de ICCID**: Enviar o campo `ICCID` somente se preenchido; se nulo, omitir ou enviar nulo/vazio.
-  3. **Identificação e Observação da OS (Work Order Notes / Special Instructions)**:
-     - Para vendas conjuntas de PayTV com Sky Móvel A La Carte (e-SIM), marcar a OS para identificação no MOS/TOA (`isESimSale = "true"`).
-     - Inserir no campo de Observação para o Técnico / Credenciado:
+- **Regras quando o tipo for e-SIM (`lineActivationType == 'ESIM'`)**:
+  1. **Cenário Telefonia Solo (Avulsa)**:
+     - **NÃO GERA ORDEM DE SERVIÇO (OS)**.
+     - O BPELCORE suprime integralmente a chamada de abertura de OS para o MOS/TOA.
+  2. **Cenário Venda Conjunta (PayTV + Telefonia e-SIM)**:
+     - A OS no MOS/TOA é gerada **SOMENTE para os itens/equipamentos de PayTV**.
+     - **Supressão de Item de OS**: O BPELCORE **NÃO deve criar item de OS** para a linha de telefonia móvel e-SIM (filtrar os itens de e-SIM no mapeamento de linhas da OS).
+     - **Observação na OS**: Inserir no campo de observação da OS (`workOrderRemarks` / Instrução ao Técnico) a mensagem informativa:
        ```text
-       [SKY MOVEL - E-SIM]: Cliente adquiriu Sky Movel com e-SIM. Ativacao ocorrera automaticamente apos habilitacao do PayTV. NAO coletar e NAO baixar estoque de chip fisico (ICCID).
+       [SKY MOVEL - E-SIM]: Cliente adquiriu habilitacao de e-SIM Sky Movel. Ativacao ocorrera automaticamente apos habilitacao do PayTV. NAO coletar e NAO baixar estoque de chip fisico (ICCID).
        ```
-  4. **Criação da Ordem no Mobile Services pós-OS**:
-     - No fluxo de venda combinada (PayTV + Telefonia), **o MOS / TOA é o responsável por invocar a API `createOrder` no Mobile Services logo após a criação da OS**.
-     - Se o e-SIM estiver sem estoque, o MOS/TOA envia `"ESIM sem estoque"` no ICCID para que a ordem no Mobile Services fique com status `"awaitingSIM"`.
 
 ---
 
 ## 4. Especificação Técnica: Maestro
 
 ### 4.1. Componente: `ProcessHardwareFulfillmentOrder`
+- **Objetivo**: Responsável pela orquestração do fulfillment de equipamentos e itens físicos (Decodificadores, Antenas e SIM Cards convencionais).
+- **Modelo de Invocação**: **Assíncrono**. Disparado pelo motor de **Tramitação de Pedidos** (Orquestrador do Maestro via mensageria JMS).
 
 #### Alterações no Fluxo:
-1. **Abertura de OS no MOS / TOA (Quando executada via Hardware / PDV)**:
-   - Para os PDVs cuja abertura de OS é de responsabilidade da esteira de hardware:
-     - Repassar `lineActivationType = "ESIM"` ao TOA/MOS.
-     - Enviar `lineIccid` apenas se estiver preenchido.
-     - Marcar a OS com a flag de e-SIM e incluir a instrução padronizada na observação da OS para o credenciado/técnico.
+1. **Regras de Abertura de OS no MOS / TOA (Quando executada via Hardware / PDV)**:
+   - **Telefonia Solo com e-SIM**: **NÃO gerar OS** no MOS/TOA.
+   - **PayTV + e-SIM**:
+     - Gerar a OS **SOMENTE para os itens de PayTV**.
+     - **NÃO criar item de OS para cenários de e-SIM**: Suprimir/filtrar itens de e-SIM no payload de criação da OS.
+     - Inserir a observação informando a habilitação de e-SIM na OS de PayTV.
+2. **Supressão de Despacho e Baixa de Estoque Físico**:
+   - Para itens com `lineActivationType = "ESIM"`, o Maestro **NÃO deve gerar tarefas de separação/despacho físico de chip**, nem exigir validação de serial de SIM Card físico ou baixa de estoque.
 
 ---
 
 ### 4.2. Componente: `ProcessSoftwareFulfillmentOrder`
+- **Objetivo**: Responsável pelo provisionamento de serviços lógicos e integração com o Mobile Services para ativação da linha de telefonia móvel.
+- **Modelo de Invocação**: **Assíncrono**. Acionado pelo motor de **Tramitação de Pedidos** (JMS).
 
 #### Alterações no Fluxo:
-1. **Verificação de Ativação e Estoque**:
-   - Condição de análise:
-     ```xpath
-     $orderItem/ns:lineActivationType = 'ESIM'
-     ```
-2. **Invocação da API `createOrder` do Mobile Services**:
-   - **Venda Conjunta (PayTV + Telefonia)**: 
-     - Quem cria a ordem no Mobile Services é o **MOS / TOA**, logo após a criação da Ordem de Serviço (OS).
-     - O `ProcessSoftwareFulfillmentOrder` (Maestro) correlaciona a ordem gerada e entra diretamente no fluxo de espera (`<pick>`) aguardando a conclusão da ativação da linha móvel.
-   - **Venda Avulsa (Apenas Telefonia Móvel)**:
-     - O próprio `ProcessSoftwareFulfillmentOrder` (Maestro) invoca a API `createOrder` do **Mobile Services**.
-     - Se `lineActivationType == 'ESIM'` e o ICCID for **nulo ou vazio**:
-       - Envia no payload da API o campo `ICCID` com o valor literal `"ESIM sem estoque"`.
-       - A API `createOrder` registra o pedido no Mobile Services com status `"awaitingSIM"`.
-       - O Maestro entra em atividade de espera (`<pick>`).
-     - Se `lineIccid` estiver preenchido: envia o ICCID real e segue o provisionamento imediato.
+1. **Integração com a API `createOrder` (Mobile Services)**:
+   - Para itens de telefonia com `lineActivationType == 'ESIM'`:
+     - **Quando TIVER estoque de e-SIM** (`lineIccid` preenchido):
+       - Executa a **ativação normal**, enviando o valor real de `lineIccid` na API `createOrder`.
+       - Com o retorno de sucesso da API, prossegue para a liberação imediata do produto no Parque.
+     - **Quando NÃO tiver estoque de e-SIM** (`lineIccid` nulo ou vazio):
+       - No payload da API `createOrder`, informa no campo de ICCID o valor literal:
+         ```text
+         "ESIM sem estoque"
+         ```
+       - A API `createOrder` do Mobile Services valida esse valor e cria a ordem com status:
+         ```text
+         "awaitingEsim"
+         ```
+       - O `ProcessSoftwareFulfillmentOrder` recebe a confirmação e entra em atividade de espera assíncrona (`<pick>` / correlation por `OrderNumber`).
 
-3. **Mecanismo de Espera (Pick / Receive Assíncrono)**:
-   - Após o `createOrder` com status `awaitingSIM`, o BPEL do `ProcessSoftwareFulfillmentOrder` deve entrar em uma atividade `<receive>` correlacionada (ou `<pick>`) aguardando notificação:
-     - **Branch 1 (Sucesso - Ativação e-SIM)**:
-       - Disparado pelo WebHook de Mobile Services (`MobileServicesWebHook`) após o cliente ou operador efetuar a reserva/ativação (via Tela de Telefonia do iCare Clientes ou rotina de fila).
+2. **Mecanismo de Retomada e Conclusão via WebHook**:
+   - O processo permanece em espera no `<pick>` até a ocorrência de um dos eventos:
+     - **Branch 1 (Reserva Concluída - Ativação do e-SIM)**:
+       - Disparado pelo `MobileServicesWebHook` assim que a reserva for efetuada (via Tela de Telefonia do iCare Clientes ou rotina de fila).
        - Payload recebido: `OrderNumber`, `ICCID`, `Status = "ACTIVE"`.
-       - Ação do Maestro:
-         - Gravar o `ICCID` definitivo na Keyword correspondente da conta.
-         - Liberar a conclusão do produto no Parque (Instalação/Parque de Serviços).
-         - Finalizar o fulfillment com sucesso.
+       - Ações do Maestro:
+         - Gravar o `ICCID` definitivo na Keyword correspondente da conta no CRM/Billing.
+         - Liberar a conclusão do produto no Parque.
+         - Finalizar o fulfillment de software com sucesso.
      - **Branch 2 (Cancelamento do Pedido)**:
-       - Se o pedido for cancelado por desistência ou expiração de tempo limite (Timer / SLA configurável).
-       - Executar rotina de cancelamento e limpeza de recursos pendentes.
+       - Cancelamento por solicitação do cliente ou expiração de timeout da proposta.
+       - Executa rotina de cancelamento da ordem e limpeza de recursos pendentes.
 
 ---
 
 ## 5. Matriz de De-Para (Data Mapping)
 
-### 5.1. BPELCORE (`ProcessCoreSalesEBF`)
+### 5.1. BPELCORE e Maestro Hardware (Criação de OS no MOS / TOA)
 
-| Campo de Origem (SF Proposal) | Campo de Destino (EBM / Target) | Transformação / Regra |
+| Cenário de Venda / Origem | Item de OS no TOA | `workOrderRemarks` (Observação da OS) |
 | :--- | :--- | :--- |
-| `Proposal.lineActivationType` | `CoreSalesEBM/LineItem/lineActivationType` | Mapeamento direto (`"ESIM"` ou `"SIM_CARD"`) |
-| `Proposal.lineIccid` | `CoreSalesEBM/LineItem/lineIccid` | Mapeamento direto (pode vir nulo) |
-| `lineActivationType = "ESIM"` | CRM Account Keywords: `LINE_ACTIVATION_TYPE` | Inserir keyword na conta com valor `"ESIM"` |
-| `lineActivationType = "ESIM"` E `lineIccid IS NULL` | `CreateInteractionEBM/ReasonCode` | Fixo: `404321` |
-| `lineActivationType = "ESIM"` E `lineIccid IS NULL` | `CreateInteractionEBM/Category` | Fixo: `"TECNICO"` |
-| `lineActivationType = "ESIM"` E `lineIccid IS NULL` | `CreateInteractionEBM/SubCategory` | Fixo: `"MVNO SURF"` |
-| `lineActivationType = "ESIM"` E `lineIccid IS NULL` | `CreateInteractionEBM/Manifestation` | Fixo: `"Informação"` |
-| `lineActivationType = "ESIM"` | TOA Work Order: `lineActivationType` | Repassar `"ESIM"` para MOS/TOA |
-| `lineIccid` | TOA Work Order: `lineIccid` | Se preenchido, repassar; se nulo, omitir |
-| Venda PayTV + e-SIM A La Carte | TOA Work Order: `workOrderRemarks` | Concatenar texto padronizado informando e-SIM |
+| **Telefonia Solo (`lineActivationType = "ESIM"`)** | **Nenhum** (Não gera OS no TOA) | N/A (Chamada suprimida) |
+| **PayTV + Sky Móvel e-SIM** | **Apenas itens de PayTV** (Suprimir itens de e-SIM) | Concatenar texto informativo de habilitação de e-SIM |
+| `lineActivationType = "ESIM"` (BPELCORE) | Keyword da Conta: `SKY_MOBILE_ACTIVATION_TYPE` | Gravar `"ESIM"` na Conta CRM/Billing |
+| `lineActivationType = "ESIM"` E `lineIccid IS NULL` | `CreateInteractionEBM` (iCare) | Razão: `404321`, Categoria: `"TECNICO"`, Subcat: `"MVNO SURF"`, Manifestação: `"Informação"` |
 
-### 5.2. Maestro (`ProcessSoftwareFulfillmentOrder`)
+### 5.2. Maestro (`ProcessSoftwareFulfillmentOrder`) - Integração Mobile Services
 
-| Cenário de Entrada | Campo `ICCID` no `createOrder` | Status Resultante da Ordem |
-| :--- | :--- | :--- |
-| `lineActivationType == 'ESIM'` E `lineIccid` preenchido | Valor real de `lineIccid` | Fluxo normal de ativação imediata |
-| `lineActivationType == 'ESIM'` E `lineIccid` nulo/vazio | `"ESIM sem estoque"` | `"awaitingSIM"` (Aguarda WebHook) |
-| `lineActivationType != 'ESIM'` | Valor real de `lineIccid` (obrigatório para SIM físico) | Fluxo padrão de chip físico |
+| Cenário de Entrada | Campo `ICCID` no `createOrder` | Status Resultante no Mobile Services | Comportamento no Maestro |
+| :--- | :--- | :--- | :--- |
+| `lineActivationType == 'ESIM'` E `lineIccid` preenchido | Valor real de `lineIccid` | Ativação imediata | Libera produto no Parque |
+| `lineActivationType == 'ESIM'` E `lineIccid` nulo/vazio | `"ESIM sem estoque"` | `"awaitingEsim"` | Entra em Pick/Wait aguardando WebHook |
+| `lineActivationType != 'ESIM'` (SIM Físico) | Valor real de `lineIccid` | Fluxo convencional | Libera após fluxo de chip físico |
 
 ---
 
@@ -259,8 +259,8 @@ No Enterprise Business Message (EBM) de entrada de vendas (`ProcessCoreSalesEBF_
 
 1. **Falha na criação do Registro de Contato (iCare)**:
    - Configurar Fault Policy com 3 tentativas de retry (intervalo exponencial).
-   - Se a falha persistir, registrar em log com severidade WARNING e prosseguir com a venda (não bloquear a esteira de vendas do cliente por indisponibilidade do iCare).
-2. **Timeout no Maestro (`awaitingSIM`)**:
+   - Se a falha persistir, registrar em log com severidade WARNING e prosseguir com a venda (não bloquear a esteira de criação da conta por indisponibilidade do iCare).
+2. **Timeout no Maestro (`awaitingEsim`)**:
    - Definir período de espera no `<pick>` do BPEL (ex: 30 dias ou de acordo com a política de validade de proposta da SKY).
    - Ao estourar o timer, enviar notificação de falha por expiração para cancelamento seguro da ordem de software.
 3. **Idempotência no WebHook**:
@@ -271,20 +271,8 @@ No Enterprise Business Message (EBM) de entrada de vendas (`ProcessCoreSalesEBF_
 ## 7. Rastreabilidade de Requisitos
 
 | Requisito | Descrição | Componente Responsável | Status da Cobertura |
-| :---: | :--- | :--- | :---: |
+| :---: | :--- | :--- | :--- |
 | **R1** | Consulta/reserva no SF e transição ao BPEL Core sem ICCID se sem estoque | SF Web / BPELCORE | Coberto no item 3.1 e 3.2 |
 | **R2** | Reserva manual via iCare e desbloqueio do pedido via WebHook | iCare / Mobile Services / Maestro SW | Coberto no item 4.2 |
 | **R3** | Registro de Contato Completo informando falta de estoque de e-SIM | BPELCORE (`ProcessCoreSalesEBF`) | Coberto no item 3.3 |
-| **R4** | Ajuste na OS para não gerar OS de e-SIM e marcar OS de PayTV no TOA | BPELCORE / Maestro HW / MOS / TOA | Coberto no item 3.4 e 4.1 |
-
----
-
-## 8. Plano de Testes Integrados (Casos de Teste)
-
-| ID | Cenário de Teste | Dados de Entrada | Resultado Esperado |
-| :--- | :--- | :--- | :--- |
-| **TC-01** | Venda e-SIM **sem** estoque (Linha Avulsa) | `lineActivationType = "ESIM"`, `lineIccid = null` | - Conta criada com keyword `LINE_ACTIVATION_TYPE = "ESIM"`<br/>- Registro de contato gerado com razão `404321`<br/>- Ordem de Software criada com ICCID `"ESIM sem estoque"` e status `"awaitingSIM"` |
-| **TC-02** | Venda e-SIM **com** estoque (Linha Avulsa) | `lineActivationType = "ESIM"`, `lineIccid = "8955..."` | - Conta criada com keyword `LINE_ACTIVATION_TYPE = "ESIM"`<br/>- **Não** cria registro de contato `404321`<br/>- Ordem de Software ativada imediatamente com o ICCID real |
-| **TC-03** | Venda Conjunta PayTV + e-SIM sem estoque | PayTV + Sky Móvel (`"ESIM"`, `lineIccid = null`) | - OS de PayTV gerada no TOA com observação informando que o e-SIM será ativado após habilitação<br/>- Não é solicitada digitação nem baixa de ICCID pelo técnico |
-| **TC-04** | Liberação de Ordem via WebHook | Callback com `OrderNumber` e novo `ICCID` | - Maestro retoma a partir do status `"awaitingSIM"`<br/>- Grava novo ICCID na keyword da conta<br/>- Libera produto no Parque com sucesso |
-| **TC-05** | Venda Tradicional (Chip Físico) | `lineActivationType = "SIM_CARD"`, `lineIccid = "8955..."` | - Comportamento legado mantido sem regressão |
+| **R4** | Ajuste na OS para não gerar OS de e-SIM e marcar OS de PayTV no TOA | BPELCORE / Maestro HW / MOS / TOA | Coberto no item 1.1, 3.4 e 4.1 |
